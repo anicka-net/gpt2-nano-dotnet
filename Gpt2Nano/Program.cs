@@ -171,12 +171,13 @@ while (true)
     firstRun = false;
     var sw = System.Diagnostics.Stopwatch.StartNew();
     int tokenCount = 0;
+    var trimmedPrompt = prompt.TrimEnd();
 
     Console.ForegroundColor = ConsoleColor.Green;
-    Console.Write($"» {prompt}");
+    Console.Write($"» {trimmedPrompt} ");
     Console.ForegroundColor = ConsoleColor.White;
 
-    await foreach (var token in GenerateStreamAsync(model, prompt, sampling, maxNewTokens: maxTokens))
+    await foreach (var token in GenerateStreamAsync(model, trimmedPrompt + " ", sampling, maxNewTokens: maxTokens, overflowForSentence: 30))
     {
         Console.Write(token);
         tokenCount++;
@@ -303,13 +304,15 @@ static Tensor SampleWithConfig(Tensor logits, SamplingConfig config)
 
 async IAsyncEnumerable<string> GenerateStreamAsync(
     GPT gpt, string prompt, SamplingConfig sampling,
-    int maxNewTokens = 100,
+    int maxNewTokens = 100, int overflowForSentence = 0,
     [EnumeratorCancellation] CancellationToken ct = default)
 {
     var tokens = Encode(prompt, merges, vocab);
     using var noGrad = torch.no_grad();
+    var hardLimit = maxNewTokens + overflowForSentence;
+    var pastMinimum = false;
 
-    for (int i = 0; i < maxNewTokens; i++)
+    for (int i = 0; i < hardLimit; i++)
     {
         ct.ThrowIfCancellationRequested();
         using var scope = torch.NewDisposeScope();
@@ -325,6 +328,11 @@ async IAsyncEnumerable<string> GenerateStreamAsync(
         var text = inverseVocab.TryGetValue(nextToken, out var tok)
             ? (tok == "<|EOW|>" ? " " : tok) : "?";
         yield return text;
+
+        if (i >= maxNewTokens - 1)
+            pastMinimum = true;
+        if (pastMinimum && text.Contains('.'))
+            yield break;
 
         await Task.Yield();
     }
