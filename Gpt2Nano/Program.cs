@@ -30,7 +30,8 @@ using static TorchSharp.torch.nn;
 
 var modelPath = GetArg(args, "--model") ?? FindDefault("model.safetensors", "weights");
 var tokenizerDir = GetArg(args, "--tokenizer") ?? FindDefault("vocab.json", "data/bpe-tokenizer", returnDir: true);
-var userPrompt = GetArg(args, "--prompt");
+var userPrompt = GetArg(args, "--prompt") ?? "The meaning of life is";
+var maxTokens = int.TryParse(GetArg(args, "--tokens"), out var t) ? t : 60;
 
 if (modelPath is null || !File.Exists(modelPath))
 {
@@ -84,24 +85,109 @@ catch (Exception ex) when (ex is InvalidDataException or NotSupportedException)
 }
 model.eval();
 
-Console.WriteLine($"GPT-2 Nano loaded: {model.parameters().Sum(p => p.numel()):#,0} parameters");
-Console.WriteLine($"  Weights: {Path.GetFileName(modelPath)} (SafeTensors)");
-Console.WriteLine($"  Attention: scaled_dot_product_attention");
-Console.WriteLine();
+var paramCount = model.parameters().Sum(p => p.numel());
 
-// ---- Generate ----
+// ---- Interactive demo ----
 
 var sampling = new SamplingConfig(Temperature: 0.8f, TopK: 50, TopP: 0.9f);
-var prompts = userPrompt is not null
-    ? new[] { userPrompt }
-    : new[] { "The ", "Science is ", "In the year " };
 
-foreach (var prompt in prompts)
+Console.ForegroundColor = ConsoleColor.Cyan;
+Console.WriteLine("┌─────────────────────────────────────────────────────────────────┐");
+Console.WriteLine("│  GPT-2 Nano — Pure .NET Inference                              │");
+Console.WriteLine("│  Train in Python, infer in C#. No Python runtime needed.        │");
+Console.WriteLine("└─────────────────────────────────────────────────────────────────┘");
+Console.ResetColor();
+Console.WriteLine();
+Console.ForegroundColor = ConsoleColor.DarkGray;
+Console.WriteLine($"  Model:      {paramCount:#,0} parameters (12 layers, 512-dim, 8 heads)");
+Console.WriteLine($"  Weights:    {Path.GetFileName(modelPath)} (SafeTensors — no pickle, no code execution)");
+Console.WriteLine($"  Attention:  scaled_dot_product_attention (SDPA)");
+Console.WriteLine($"  Tokenizer:  BPE ({vocab.Count:#,0} tokens)");
+Console.WriteLine($"  Sampling:   temp={sampling.Temperature}, top-k={sampling.TopK}, top-p={sampling.TopP}");
+Console.WriteLine($"  Engine:     TorchSharp on .NET {Environment.Version}");
+Console.ResetColor();
+Console.WriteLine();
+Console.ForegroundColor = ConsoleColor.DarkGray;
+Console.WriteLine("  Type a prompt and press Enter. The model completes your text.");
+Console.WriteLine("  Commands: /tokens <n>  /temp <f>  /topk <n>  /topp <f>  /quit");
+Console.ResetColor();
+Console.WriteLine();
+
+// First auto-prompt
+var prompt = userPrompt;
+var firstRun = true;
+
+while (true)
 {
+    if (!firstRun)
+    {
+        Console.ForegroundColor = ConsoleColor.Cyan;
+        Console.Write("prompt» ");
+        Console.ResetColor();
+
+        var line = Console.ReadLine();
+        if (line is null) break;
+        line = line.Trim();
+        if (line.Length == 0) continue;
+
+        if (line.StartsWith("/quit") || line.StartsWith("/exit"))
+            break;
+        if (line.StartsWith("/tokens ") && int.TryParse(line[8..], out var newMax))
+        {
+            maxTokens = newMax;
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  → max tokens: {maxTokens}");
+            Console.ResetColor();
+            continue;
+        }
+        if (line.StartsWith("/temp ") && float.TryParse(line[6..], out var newTemp))
+        {
+            sampling = sampling with { Temperature = newTemp };
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  → temperature: {sampling.Temperature}");
+            Console.ResetColor();
+            continue;
+        }
+        if (line.StartsWith("/topk ") && int.TryParse(line[6..], out var newTopK))
+        {
+            sampling = sampling with { TopK = newTopK };
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  → top-k: {sampling.TopK}");
+            Console.ResetColor();
+            continue;
+        }
+        if (line.StartsWith("/topp ") && float.TryParse(line[6..], out var newTopP))
+        {
+            sampling = sampling with { TopP = newTopP };
+            Console.ForegroundColor = ConsoleColor.DarkGray;
+            Console.WriteLine($"  → top-p: {sampling.TopP}");
+            Console.ResetColor();
+            continue;
+        }
+
+        prompt = line;
+    }
+
+    firstRun = false;
+    var sw = System.Diagnostics.Stopwatch.StartNew();
+    int tokenCount = 0;
+
+    Console.ForegroundColor = ConsoleColor.Green;
     Console.Write($"» {prompt}");
-    await foreach (var token in GenerateStreamAsync(model, prompt, sampling, maxNewTokens: 80))
+    Console.ForegroundColor = ConsoleColor.White;
+
+    await foreach (var token in GenerateStreamAsync(model, prompt, sampling, maxNewTokens: maxTokens))
+    {
         Console.Write(token);
+        tokenCount++;
+    }
+
+    sw.Stop();
     Console.WriteLine();
+    Console.ForegroundColor = ConsoleColor.DarkGray;
+    var tokPerSec = tokenCount / sw.Elapsed.TotalSeconds;
+    Console.WriteLine($"  [{tokenCount} tokens in {sw.Elapsed.TotalSeconds:F1}s — {tokPerSec:F1} tok/s]");
+    Console.ResetColor();
     Console.WriteLine();
 }
 
